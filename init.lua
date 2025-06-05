@@ -46,10 +46,13 @@ require('lazy').setup({
     build = ':TSUpdate',
     config = function()
       require('nvim-treesitter.configs').setup {
-        ensure_installed = { 'c', 'cpp', 'ocaml', 'haskell' }, -- Languages you use
+        ensure_installed = { 'c', 'cpp', 'ocaml', 'haskell', 'rust' }, -- Languages you use
         highlight = {
           enable = true,
           additional_vim_regex_highlighting = false,
+        },
+        indent = {
+          enable = true
         },
       }
     end,
@@ -85,7 +88,20 @@ require('lazy').setup({
       }
     end,
   },
-
+  {
+    "stevearc/conform.nvim",
+    event = { "BufWritePre" },
+    opts = {
+      formatters_by_ft = {
+        lua = { "stylua" },
+        c = { "clang-format" },
+        cpp = { "clang-format" },
+        haskell = { "ormolu" },
+        rust = { "rustfmt" }, -- Fixed: replaced '.' with ','
+      },
+      format_on_save = false,
+    },
+  },
   -- Auto-pairs (replacing manual inoremap mappings)
   {
     'windwp/nvim-autopairs',
@@ -145,6 +161,39 @@ require('lazy').setup({
           on_attach = on_attach,
         }
       end
+      if vim.fn.executable('haskell-language-server-wrapper') == 1 then
+        lspconfig.hls.setup {
+          capabilities = capabilities,
+          filetypes = { 'haskell', 'lhaskell' },
+          on_attach = on_attach,
+          settings = {
+            haskell = {
+              formattingProvider = 'ormolu',
+            },
+          },
+        }
+      end
+      if vim.fn.executable('rust-analyzer') == 1 then
+        lspconfig.rust_analyzer.setup {
+          capabilities = capabilities,
+          filetypes = { 'rust' },
+          on_attach = on_attach,
+          settings = {
+            ['rust-analyzer'] = {
+              check = {
+                command = 'clippy', -- Use clippy for checks on save
+              },
+              checkOnSave = true,
+              diagnostics = {
+                enable = true,
+              },
+              cargo = {
+                allFeatures = true, -- Build with all features enabled
+              },
+            },
+          },
+        }
+      end
     end,
   },
   {
@@ -187,9 +236,11 @@ require('lazy').setup({
       }
     end,
   },
+  { 'rust-lang/rust.vim' },
 })
+
 -- Filetype-specific settings
-vim.api.nvim_create_autocmd('FileType', {
+vim.api.nvim_create_autocmd({'FileType', 'BufWinEnter' }, {
   pattern = { 'c', 'cpp', 'asm', 's', 'hs' },
   callback = function()
     vim.opt_local.tabstop = 4
@@ -198,10 +249,9 @@ vim.api.nvim_create_autocmd('FileType', {
     vim.opt_local.autoindent = true
     vim.opt_local.cindent = true
   end,
-
 })
 
-vim.api.nvim_create_autocmd('FileType', {
+vim.api.nvim_create_autocmd({'FileType', 'BufWinEnter' }, {
   pattern = 'lua',
   callback = function()
     vim.opt_local.tabstop = 2
@@ -210,6 +260,17 @@ vim.api.nvim_create_autocmd('FileType', {
     vim.opt_local.autoindent = true
     vim.opt_local.smartindent = true -- Better for Lua than cindent
     vim.opt_local.cindent = false -- Disable cindent for Lua
+  end,
+})
+
+vim.api.nvim_create_autocmd({'FileType', 'BufWinEnter' }, {
+  pattern = 'rust', -- Fixed: missing comma after 'pattern'
+  callback = function()
+    vim.opt_local.tabstop = 4
+    vim.opt_local.shiftwidth = 4
+    vim.opt_local.expandtab = true
+    vim.opt_local.autoindent = true
+    vim.opt_local.cindent = true
   end,
 })
 
@@ -295,7 +356,6 @@ vim.api.nvim_create_user_command('RunFile', compile_and_run, {})
 -- Map to <Leader>r
 vim.keymap.set('n', '<Leader>r', ':RunFile<CR>', { noremap = true, silent = true })
 
-
 -- Function to compile C/C++ files
 local function compile_c()
   local filetype = vim.bo.filetype
@@ -330,8 +390,44 @@ vim.api.nvim_create_user_command('CompileC', compile_c, {})
 -- Map to <Leader>b
 vim.keymap.set('n', '<Leader>b', ':CompileC<CR>', { noremap = true, silent = true, desc = 'Compile C/C++ file' })
 
--- Open a file and close the current buffer.
-vim.api.nvim_create_user_command('EditAndClose',function(opts)
+-- Function to compile C/C++ files
+local function compile_debug_c()
+  local filetype = vim.bo.filetype
+  if filetype ~= "c" and filetype ~= "cpp" then
+    vim.notify('Error: DebugC only supports C/C++ files', vim.log.levels.ERROR)
+    return
+  end
+  -- Always save the buffer silently
+  vim.cmd('silent write')
+  local filename = vim.fn.expand('%:p')
+  local basename = vim.fn.expand('%:t:r')
+  local dir = vim.fn.expand('%:p:h')
+  local compiler = (filetype == "cpp") and 'g++' or 'gcc'
+  local std = (filetype == "cpp") and 'c++17' or 'c11'
+  local cmd = string.format(
+    'cd %s && %s -g -Wall -std=%s %s -o %s',
+    vim.fn.shellescape(dir),
+    compiler,
+    std,
+    vim.fn.shellescape(filename),
+    vim.fn.shellescape(basename)
+  )
+  vim.notify('Compiling w/ debug: ' .. cmd, vim.log.levels.INFO)
+  vim.cmd('below 12new') -- Open 12-row terminal
+  vim.fn.termopen(cmd)
+  vim.cmd('startinsert')
+end
+
+-- Create user command
+vim.api.nvim_create_user_command('DebugC', compile_debug_c, {})
+
+-- Map to <Leader>b
+vim.keymap.set('n', '<Leader>d', ':DebugC<CR>', { noremap = true, silent = true, desc = 'Compile and Debug C/C++ file' })
+
+
+
+-- Open a file and close the current buffer
+vim.api.nvim_create_user_command('EditAndClose', function(opts)
   if opts.args == '' then
     vim.notify('Error: File path required', vim.log.levels.ERROR)
     return
@@ -343,11 +439,15 @@ vim.api.nvim_create_user_command('EditAndClose',function(opts)
   end
 end, { nargs = 1, complete = 'file' })
 
--- mapping
-vim.keymap.set('n', '<Leader>o', ':EditAndClose ', { noremap = true, silent=false, desc = 'Open file and close current buffer' })
+-- Mapping
+vim.keymap.set('n', '<Leader>o', ':EditAndClose ', { noremap = true, silent = false, desc = 'Open file and close current buffer' })
 
 -- Command to reformat Lua files
 vim.api.nvim_create_user_command('FormatLua', function()
+  if vim.bo.filetype ~= 'lua' then
+    vim.notify('Error: FormatLua only supports Lua files', vim.log.levels.ERROR)
+    return
+  end
   vim.opt_local.tabstop = 2
   vim.opt_local.shiftwidth = 2
   vim.opt_local.expandtab = true
@@ -364,3 +464,68 @@ end, { desc = 'Reformat Lua file with 2-space indentation' })
 
 -- Optional mapping
 vim.keymap.set('n', '<Leader>fl', ':FormatLua<CR>', { noremap = true, silent = true, desc = 'Format Lua file' })
+
+-- Function to compile and run Rust files
+local function compile_and_run_rust()
+  local filetype = vim.bo.filetype
+  if filetype ~= "rust" then
+    vim.notify('Error: RunRust only supports Rust files', vim.log.levels.ERROR)
+    return
+  end
+  -- Always save the buffer silently
+  vim.cmd('silent write')
+  local filename = vim.fn.expand('%:p')
+  local dir = vim.fn.expand('%:p:h')
+  local cmd = string.format(
+    'cd %s && cargo build --release && cargo run --release; exec $SHELL',
+    vim.fn.shellescape(dir)
+  )
+  vim.notify('Running: ' .. cmd, vim.log.levels.INFO)
+  vim.cmd('below 12new')
+  vim.fn.termopen(cmd)
+  vim.cmd('startinsert')
+end
+
+-- Create user command for Rust
+vim.api.nvim_create_user_command('RunRust', compile_and_run_rust, {})
+
+-- Map to <Leader>r for Rust files
+vim.keymap.set('n', '<Leader>r', function()
+  if vim.bo.filetype == 'rust' then
+    vim.cmd('RunRust')
+  else
+    vim.cmd('RunFile') -- Fallback to C/C++ for non-Rust files
+  end
+end, { noremap = true, silent = true, desc = 'Run file (Rust or C/C++)' })
+
+-- Function to compile Rust files
+local function compile_rust()
+  local filetype = vim.bo.filetype
+  if filetype ~= "rust" then
+    vim.notify('Error: CompileRust only supports Rust files', vim.log.levels.ERROR)
+    return
+  end
+  -- Always save the buffer silently
+  vim.cmd('silent write')
+  local dir = vim.fn.expand('%:p:h')
+  local cmd = string.format(
+    'cd %s && cargo build',
+    vim.fn.shellescape(dir)
+  )
+  vim.notify('Compiling: ' .. cmd, vim.log.levels.INFO)
+  vim.cmd('below 12new')
+  vim.fn.termopen(cmd)
+  vim.cmd('startinsert')
+end
+
+-- Create user command for Rust compilation
+vim.api.nvim_create_user_command('CompileRust', compile_rust, {})
+
+-- Map to <Leader>b for Rust files
+vim.keymap.set('n', '<Leader>b', function()
+  if vim.bo.filetype == 'rust' then
+    vim.cmd('CompileRust')
+  else
+    vim.cmd('CompileC') -- Fallback to C/C++ for non-Rust files
+  end
+end, { noremap = true, silent = true, desc = 'Compile file (Rust or C/C++)' })
